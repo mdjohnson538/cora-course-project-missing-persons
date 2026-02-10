@@ -6,7 +6,7 @@
 
 ## 1. Purpose and Motivation
 
-This document proposes a JSON data modeling strategy for three datasets used in the **CoRA (Comingled Remains Analysis)** partnership between the University of Nebraska at Omaha (UNO) and the Defense POW/MIA Accounting Agency (DPAA). The work is part of a semester-long Data Visualization course project focused on responsible, transparent data design.
+This document proposes a JSON data modeling strategy for three datasets used in the **CoRA (Comingled Remains Analysis)** partnership between the University of Nebraska at Omaha (UNO) and the Defense POW/MIA Accounting Agency (DPAA). The work is part of a semester-long Data Visualization course project focused on responsible, transparent data design. In service of this goal, the schema design is driven by the following **objectives**:
 
 - Establish a **robust and visualization-friendly schema** that can be reliably consumed by a wide range of analytical workflows within the CoRA application. The proposed schema is designed to “play nicely” with downstream dashboards, summaries, and comparative visualizations—supporting tasks such as aggregation, faceting, filtering, and contextual comparison across case types. Importantly, the schema is intended to support **both individual record-level review** (e.g., navigable tables and case detail views) **and higher-level summarization and aggregation**, enabling users to move fluidly between detailed inspection and broader pattern analysis.
 - Represent each dataset **exactly as provided** in CSV form  
