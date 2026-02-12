@@ -1,0 +1,471 @@
+---
+title: "NaMus Data - Exploratory Data Analysis"
+author: "ISQA 8750: NaMus Project Group - University of Nebraska at Omaha"
+date: "2026-02-12"
+output:
+  html_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(janitor)
+library(scales)
+library(glue)
+library(leaflet)
+```
+
+
+```{r data import, include=FALSE}
+missing_persons_raw <- read.csv("namus_missing_enriched_v2.csv")
+unclaimed_persons_raw <- read.csv("namus_unclaim_enriched_v2.csv")
+unidentified_persons_raw <- read.csv("namus_unid_enriched_v2.csv")
+```
+
+
+
+```{r data cleaning, echo=FALSE}
+# missing persons clean up
+missing_persons <- missing_persons_raw %>%
+  clean_names() %>%
+    mutate(
+    # Dates: character -> Date
+    dlc = mdy(dlc),
+    date_modified = mdy(date_modified),
+
+    # Missing age: "14 Years" -> 14
+    missing_age = str_extract(missing_age, "\\d+") %>%
+      as.numeric(),
+
+    # Optional: normalize character fields (trim whitespace)
+    across(
+      c(
+        case_number,
+        legal_last_name,
+        legal_first_name,
+        city,
+        county,
+        state,
+        biological_sex,
+        race_ethnicity
+      ),
+      ~ str_trim(.x)
+    )
+  )
+
+# unclaimed persons clean up
+unclaimed_persons <-  unclaimed_persons_raw %>%
+  clean_names() %>%
+  mutate(
+    # Dates: character -> Date
+    dbf = mdy(dbf),
+    date_modified = mdy(date_modified),
+
+    # Optional: normalize character fields
+    across(
+      c(
+        case_number,
+        legal_last_name,
+        legal_first_name,
+        biological_sex,
+        race_ethnicity,
+        city,
+        county,
+        state
+      ),
+      ~ str_trim(.x)
+    )
+  )
+
+
+# unidentified persons clean up
+unidentified_persons <- unidentified_persons_raw %>%
+  clean_names() %>%
+  mutate(
+    # Dates: character -> Date
+    dbf = mdy(dbf),
+    date_modified = mdy(date_modified),
+
+    # ME/C case: trim whitespace (leave as character)
+    me_c_case = str_squish(me_c_case),
+
+    # Age bounds: ensure numeric (they're int already, but this is defensive)
+    age_from = suppressWarnings(as.integer(age_from)),
+    age_to   = suppressWarnings(as.integer(age_to)),
+
+    # Optional: normalize character fields (trim whitespace)
+    across(
+      c(
+        case_number,
+        city,
+        county,
+        state,
+        biological_sex,
+        race_ethnicity
+      ),
+      ~ str_trim(.x)
+    )
+  )
+
+```
+# Introduction
+
+This notebook presents a concise exploratory data analysis of three NamUs datasets: *Missing Persons*, *Unclaimed Persons*, and *Unidentified Persons*—with the goal of understanding their structure, distributions, and analytic affordances as they relate to visulization.
+
+Following a bit of data cleaning, the analysis uses a small, reusable explore_dataset() function to perform a consistent, single-variable review of each dataset. For every feature, the explorer summarizes type, missingness, value ranges, and common categories. Each dataset is then accompanied by a short written interpretation that distills these observations and notes implications for visualization design.
+
+The notebook is organized to begin with a geographic overview of all three datasets combined, using county-level prominence to establish the national spatial distribution and relative concentration of cases. From there, each dataset is examined individually, with attention to how differences in temporal coverage, demographic certainty, and geographic resolution suggest different—and potentially complementary—visualization strategies.
+
+# Geographic Spread of All Data
+
+```{r map all data, include=FALSE, echo=TRUE}
+map_all_datasets_county_prominence <- function(
+  missing_df,
+  unclaimed_df,
+  unidentified_df,
+  label_col = "case_number",
+  coord_level = c("county", "city"),
+  radius_range = c(2, 18),
+  use_log = TRUE
+) {
+  coord_level <- match.arg(coord_level)
+
+  coord_cols <- if (coord_level == "county") {
+    c(lat = "intptlat_county", lon = "intptlong_county")
+  } else {
+    c(lat = "intptlat_city", lon = "intptlong_city")
+  }
+
+  prep <- function(df, dataset_type) {
+    df %>%
+      transmute(
+        dataset_type = dataset_type,
+        case_number  = if (label_col %in% names(df)) as.character(.data[[label_col]]) else NA_character_,
+        lat = suppressWarnings(as.numeric(.data[[coord_cols["lat"]]])),
+        lon = suppressWarnings(as.numeric(.data[[coord_cols["lon"]]]))
+      ) %>%
+      filter(!is.na(lat), !is.na(lon))
+  }
+
+  pts <- bind_rows(
+    prep(missing_df,      "Missing Persons"),
+    prep(unclaimed_df,    "Unclaimed Persons"),
+    prep(unidentified_df, "Unidentified Persons")
+  )
+
+  # Aggregate to show prominence (counts per centroid)
+  agg <- pts %>%
+    group_by(dataset_type, lat, lon) %>%
+    summarise(n = n(), .groups = "drop")
+
+  # Radius scaling
+  scale_input <- if (use_log) log1p(agg$n) else agg$n
+  rad <- rescale(scale_input, to = radius_range)
+  agg$radius <- rad
+
+  pal <- colorFactor(
+    palette = c(
+      "Missing Persons" = "#1f77b4",
+      "Unclaimed Persons" = "#ff7f0e",
+      "Unidentified Persons" = "#2ca02c"
+    ),
+    domain = agg$dataset_type
+  )
+
+  leaflet(agg) %>%
+    addProviderTiles(providers$CartoDB.Positron) %>%
+    addCircleMarkers(
+      lng = ~lon,
+      lat = ~lat,
+      radius = ~radius,
+      color = ~pal(dataset_type),
+      weight = 1,
+      opacity = 0.8,
+      fillOpacity = 0.35,
+      popup = ~paste0(
+        "<b>Dataset:</b> ", dataset_type, "<br/>",
+        "<b>Count at centroid:</b> ", n
+      ),
+      group = ~dataset_type
+    ) %>%
+    addLayersControl(
+      overlayGroups = c("Missing Persons", "Unclaimed Persons", "Unidentified Persons"),
+      options = layersControlOptions(collapsed = FALSE)
+    ) %>%
+    addLegend(
+      "bottomright", pal = pal, values = ~dataset_type,
+      title = "Dataset Type", opacity = 1
+    )
+  pal <- colorFactor(
+  palette = c(
+    "Missing Persons" = "#1f77b4",
+    "Unclaimed Persons" = "#ff7f0e",
+    "Unidentified Persons" = "#2ca02c"
+  ),
+  domain = c("Missing Persons", "Unclaimed Persons", "Unidentified Persons")
+)
+
+leaflet(agg) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+
+  addCircleMarkers(
+    lng = ~lon,
+    lat = ~lat,
+    radius = ~radius,
+    color = ~pal(dataset_type),
+    fillOpacity = 0.4,
+    stroke = FALSE,
+    group = ~dataset_type
+  ) %>%
+
+  # Toggle checkboxes (still gray — unavoidable)
+  addLayersControl(
+    overlayGroups = c(
+      "Missing Persons",
+      "Unclaimed Persons",
+      "Unidentified Persons"
+    ),
+    options = layersControlOptions(collapsed = FALSE)
+  ) %>%
+
+  # ✅ Colored legend (this is what users visually read)
+  addLegend(
+    position = "bottomright",
+    pal = pal,
+    values = c(
+      "Missing Persons",
+      "Unclaimed Persons",
+      "Unidentified Persons"
+    ),
+    title = "Dataset Type",
+    opacity = 1
+  )
+}
+
+
+```
+
+```{r map-all, echo=FALSE}
+map_all_datasets_county_prominence(
+  missing_persons,
+  unclaimed_persons,
+  unidentified_persons
+)
+```
+
+
+```{r create data set explorer function, echo=FALSE}
+# create a function to check out the datasets
+explore_dataset <- function(df, dataset_name = deparse(substitute(df))) {
+  
+  cat(glue("\n==============================\n"))
+  cat(glue("Dataset overview: {dataset_name}\n"))
+  cat(glue("==============================\n\n"))
+  
+  # ---- Dataset-level summary ----
+  cat(glue("Rows: {nrow(df)}\n"))
+  cat(glue("Columns: {ncol(df)}\n\n"))
+  
+  cat("Column types:\n")
+  print(sapply(df, class))
+  cat("\n")
+  
+  # ---- Variable-level exploration ----
+  for (var in names(df)) {
+    
+    x <- df[[var]]
+    var_class <- class(x)[1]
+    n_missing <- sum(is.na(x))
+    pct_missing <- round(100 * n_missing / length(x), 1)
+    
+    cat(glue("\n----------------------------------\n"))
+    cat(glue("Variable: {var}\n"))
+    cat(glue("Type: {var_class}\n"))
+    cat(glue("Missing: {n_missing} ({pct_missing}%)\n\n"))
+    
+    # ---- Numeric ----
+    if (is.numeric(x)) {
+      cat("Numeric summary:\n")
+      print(summary(x))
+      
+    # ---- Dates ----
+    } else if (inherits(x, "Date")) {
+      cat("Date range:\n")
+      cat(glue("  Min: {min(x, na.rm = TRUE)}\n"))
+      cat(glue("  Max: {max(x, na.rm = TRUE)}\n"))
+      
+    # ---- Character / Factor ----
+    } else if (is.character(x) || is.factor(x)) {
+      unique_n <- n_distinct(x, na.rm = TRUE)
+      cat(glue("Unique values (non-missing): {unique_n}\n\n"))
+      
+      cat("Most common values:\n")
+      print(
+        x %>%
+          as.character() %>%
+          na.omit() %>%
+          sort() %>%
+          table() %>%
+          sort(decreasing = TRUE) %>%
+          head(5)
+      )
+    }
+  }
+  
+  invisible(NULL)
+}
+```
+# Missing Persons
+
+### Dataset Explorer Output
+```{r explore missing persons}
+
+## lets explore the missing persons data set
+explore_dataset(missing_persons)
+
+```
+
+This dataset contains 26,182 records representing missing persons cases, with 15 variables spanning identifiers, demographics, temporal fields, and geographic information. The analysis below summarizes key distributional patterns, coverage, and structural characteristics observed during an initial univariate exploration.
+
+### Identifiers and Names
+
+The case_number field uniquely identifies each record, with a one-to-one correspondence between rows and case numbers. This confirms its role as a stable identifier suitable for record tracking and joins.
+
+The legal_first_name and legal_last_name fields exhibit very high cardinality, with over 6,400 unique first names and 14,200 unique last names. Common names such as Michael, John, Smith, and Johnson appear frequently, reflecting expected population distributions. 
+
+### Temporal Fields
+
+The dlc (date last contact) variable spans a wide historical range, from 1902 through early 2026, indicating the presence of both historical cold cases and very recent records. This breadth supports long-term trend analysis but also suggests the importance of stratifying by era to avoid conflating cases from substantially different reporting contexts.
+
+The date_modified variable is concentrated in the modern period (2014–2026) and potentially reflects a system update activity rather than event timing. It is probably best interpreted as metadata useful for assessing data recency or workflow processes.
+
+### Age at Disappearance
+
+The missing_age variable ranges from 1 to 116 years, with a median age of 32 and a mean of approximately 35. The distribution indicates a predominance of adult cases alongside substantial representation of minors. Extreme values at the upper end suggest potential value of follow-up validation, particularly when producing age-stratified summaries.
+
+### Geographic Coverage
+
+Geographic information is provided at the city, county, and state levels. The dataset spans 55 distinct state or territory codes, with the highest case counts observed in California, Texas, and Florida, consistent with population size and reporting volume.
+
+
+### Demographic Characteristics
+
+The biological_sex variable contains two categories—Male and Female—with males comprising approximately 63% of cases. This distribution is consistent across the dataset and supports stratified descriptive analysis.
+
+The race_ethnicity field includes 78 distinct values, encompassing both single-category and multi-category identities. While major groups such as White / Caucasian and Black / African American account for most records, the long-tail structure indicates that this variable encodes complex demographic information that would benefit from normalization prior to comparative analysis.
+
+### Geospatial Coordinates (Census-Derived)
+
+Latitude and longitude values are available at both city and county levels. County-level coordinates are nearly complete, while city-level coordinates exhibit modest missingness (approximately 7%). Coordinate ranges extend beyond the continental United States, consistent with inclusion of U.S. territories and edge-case records. County-level coordinates appear more stable and may serve as a preferred default for spatial aggregation and mapping.
+
+### Overall Assessment
+
+Overall, the dataset demonstrates broad coverage across time, geography, and demographics, with distributions that are consistent with expectations for a national missing persons dataset. Key analytical considerations emerging from this EDA include handling historical records, normalizing high-cardinality categorical variables, and applying thoughtful validation to extreme values. With these considerations addressed, the dataset is well-positioned to support descriptive analysis, trend reporting, and geographic summarization.
+
+### Thoughts on Data Visualization
+
+Beyond a queryable table, this dataset naturally supports interactive visualizations that emphasize time, geography, and demographic composition. The wide temporal span of the dlc field lends itself to interactive timelines or time-series views, while the availability of city- and county-level coordinates enables map-based exploration at multiple geographic resolutions. Demographic variables such as age, sex, and race/ethnicity are well suited to interactive distributions and comparative summaries, particularly when combined with filtering and brushing. Coordinated views—linking maps, timelines, and summary charts—would allow users to explore patterns dynamically and drill down from aggregate trends to individual cases, making the dataset especially well suited for exploratory and narrative-driven data visualization.
+
+For a data visualization audience, it will likely be useful to present geographic prominence normalized by population (per capita), as large metropolitan areas dominate raw counts and population-adjusted views can better highlight relative concentration across regions.
+
+# Unclaimed Persons
+
+### Dataset Explorer Output
+```{r explore unclaimed persons}
+
+## lets explore the unclaimed persons data set
+explore_dataset(unclaimed_persons)
+
+```
+
+
+This dataset contains 21,891 records representing unclaimed persons, with 14 variables covering identifiers, demographics, temporal fields, and geographic information. The analysis below summarizes key structural characteristics and distributional patterns observed during an initial univariate exploration.
+
+### Identifiers and Names
+
+The case_number field uniquely identifies each record, with a one-to-one correspondence between rows and case numbers. As with the missing persons dataset, this confirms its role as a stable identifier suitable for record tracking and joins.
+
+The legal_first_name and legal_last_name fields again exhibit high cardinality, with over 4,200 unique first names and 10,900 unique last names. Common names such as Robert, James, Smith, and Johnson appear most frequently, reflecting expected population patterns. These fields primarily function as natural identifiers and are most useful for reporting, linkage, or manual review rather than analytic modeling.
+
+### Temporal Fields
+
+The dbf (date body found) variable spans a long historical range, from 1939 through early 2026, indicating that the dataset includes both historical and contemporary unclaimed persons cases. A small proportion of records (approximately 2%) are missing this value, but the overall coverage supports temporal analysis across multiple decades.
+
+The date_modified variable ranges from 2010 to 2026 and likely reflects system updates or administrative activity rather than event timing. As such, it is best interpreted as metadata useful for understanding record recency or workflow processes.
+
+### Demographic Characteristics
+
+The biological_sex field contains four recorded values, with Male and Female comprising the vast majority of cases and a smaller number labeled as Unsure. This introduces slightly more categorical complexity than observed in the missing persons dataset, but the distribution remains suitable for stratified descriptive analysis.
+
+The race_ethnicity variable includes 55 distinct values, capturing both single-category identities and broader or uncertain classifications. While categories such as White / Caucasian and Black / African American account for most records, the presence of a long tail of categories suggests that normalization or grouping would be beneficial for comparative or visual analysis.
+
+### Geographic Coverage
+
+Geographic information is provided at the city, county, and state levels. The dataset spans 44 distinct state codes, with particularly high concentrations in New York, California, and Texas. City- and county-level fields show lower cardinality than in the missing persons dataset, reflecting more geographically concentrated reporting patterns.
+
+Lattitude and longitude values are available at both city and county levels, with modest missingness for city-level coordinates (approximately 2.5%) and very low missingness for county-level coordinates. Coordinate ranges are consistent with coverage across the United States and its territories, and county-level coordinates again appear to provide the most stable basis for spatial aggregation and mapping.
+
+### Overall Assessment
+
+Overall, the unclaimed persons dataset exhibits strong structural consistency and broad temporal and geographic coverage. Compared to the missing persons dataset, it shows slightly more categorical complexity in demographic fields and a greater concentration of cases in specific metropolitan regions. Key analytical considerations emerging from this EDA include handling historical records, normalizing demographic categories, and leveraging county-level geography as a stable spatial unit. With these considerations in mind, the dataset is well suited for descriptive analysis, geographic exploration, and comparative visualization.
+
+### Thoughts on Data Visualization
+
+In addition to a queryable table, this dataset lends itself well to interactive visualizations centered on time and geography. The long temporal span of the dbf field supports timeline and trend-based views, while the geographic concentration of cases makes map-based exploration particularly informative. Interactive distributions for demographic variables and coordinated views linking maps, timelines, and summary charts would allow users to explore spatial and temporal patterns dynamically and drill down from aggregate trends to individual records, aligning well with exploratory data visualization goals.
+
+From a visualization perspective, showing geographic prominence on a per-capita basis would help contextualize raw counts, since highly populated metropolitan areas otherwise dominate the map and can obscure regions with disproportionately high relative prevalence.
+
+
+# Unidentified Persons
+
+### Dataset Explorer Output
+```{r explore unidentified persons}
+
+## lets explore the unclaimed persons data set
+explore_dataset(unidentified_persons)
+
+```
+
+This dataset contains 15,477 records representing unidentified persons, with 15 variables capturing identifiers, estimated demographics, temporal fields, and geographic information. The analysis below summarizes key structural characteristics and distributional patterns observed during an initial univariate exploration.
+
+### Identifiers and Case References
+
+The case_number field uniquely identifies each record, with a one-to-one correspondence between rows and case numbers, confirming its suitability as a stable identifier for record tracking and joins.
+
+The me_c_case field provides a medical examiner or coroner case reference and exhibits very high cardinality, with nearly all values unique. A small number of records are labeled generically (e.g., “ME/C Case N/A”), indicating variability in how this identifier is populated. This field functions primarily as an administrative reference rather than an analytic feature.
+
+### Temporal Fields
+
+The dbf (date body found) variable spans a wide historical range from 1915 through early 2026, indicating that the dataset includes both long-standing historical cases and contemporary unidentified persons. This temporal breadth supports longitudinal analysis but suggests the importance of stratifying by era to account for changes in investigative practices and reporting systems.
+
+The date_modified field ranges from 2011 to 2026 and appears to reflect system updates or administrative activity rather than the timing of case events. As such, it is best interpreted as metadata related to record maintenance and recency.
+
+### Estimated Age Ranges
+
+Age information is represented as a range via age_from and age_to. Both fields exhibit approximately 21% missingness, reflecting inherent uncertainty or unavailable information in unidentified persons cases. Where present, the distributions indicate that most estimated ages fall within adult ranges, with median lower and upper bounds of approximately 25 and 45 years, respectively. The presence of wide ranges and upper bounds extending beyond 100 highlights the interpretive uncertainty associated with age estimation in this context.
+
+### Geographic Coverage
+
+Geographic information is provided at the city, county, and state levels. The dataset spans 54 distinct state or territory codes, with the largest concentrations in California, Arizona, Texas, and New York. Compared to the missing and unclaimed persons datasets, unidentified persons cases show notable clustering in specific counties and regions, suggesting localized investigative or reporting patterns.
+
+Latitude and longitude values are available at both city and county levels. City-level coordinates exhibit moderate missingness (approximately 8%), while county-level coordinates are nearly complete. Coordinate ranges extend beyond the continental United States, consistent with inclusion of U.S. territories and edge-case records. County-level coordinates again appear to provide a more stable basis for spatial aggregation.
+
+### Demographic Characteristics
+
+The biological_sex variable includes four recorded values, with Male comprising the majority of cases, followed by Female and Unsure classifications. This additional categorical complexity reflects uncertainty inherent in unidentified cases and should be considered in stratified analysis.
+
+The race_ethnicity field contains 97 distinct values, the highest among the three datasets. A substantial proportion of records are labeled as Uncertain, alongside common categories such as White / Caucasian, Black / African American, and Hispanic / Latino. The prevalence of uncertainty and multi-category values underscores the need for careful normalization or grouping prior to comparative demographic analysis.
+
+### Overall Assessment
+
+Overall, the unidentified persons dataset reflects the inherent uncertainty and complexity of cases where individual identity has not been established. Compared to the missing and unclaimed persons datasets, it exhibits higher missingness in age-related fields, greater categorical complexity in demographic variables, and pronounced geographic clustering. These characteristics make the dataset particularly well suited for descriptive, spatial, and exploratory analysis, while also emphasizing the importance of transparent handling of uncertainty in any downstream analysis or visualization.
+
+### Thoughts on Data Visualization
+
+Beyond a queryable table, this dataset is especially well suited to interactive visualizations that foreground uncertainty, time, and place. Timeline views based on dbf can highlight historical persistence and recent case activity, while map-based visualizations can reveal geographic clustering and regional investigative patterns. Interactive age-range displays and demographic summaries that explicitly communicate uncertainty would be particularly valuable. Coordinated views linking maps, timelines, and summary panels would support exploratory workflows and allow users to move fluidly between aggregate patterns and individual case context.
+
+Given the strong geographic clustering observed, population-normalized (per-capita) visualizations may be particularly informative for highlighting relative prominence beyond major metros, where raw counts alone tend to reflect population size rather than comparative concentration.
+
+
+```
